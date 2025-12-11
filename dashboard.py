@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from privacy_ml_framework import (
-    DifferentialPrivacy, PrivacyMLModel, generate_sample_data, create_privacy_accuracy_plot
+    PrivacyMLModel, get_mnist_data, create_privacy_accuracy_plot, apply_tenseal_encryption
 )
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import random
+import torch
 
 random.seed(42)
 st.set_page_config(
@@ -20,20 +21,33 @@ def main():
     
     st.sidebar.markdown("## Control Panel")
     
-    # Dataset selection
-    dataset_type = st.sidebar.selectbox(
-        "Choose Dataset",
-        ["breast_cancer", "wine"],
-        help="Select the dataset for privacy-accuracy experiments"
-    )
+    # # Dataset selection
+    st.sidebar.info("Dataset: MNIST (Real World Handwritten Digits)")
+    # dataset_type = st.sidebar.selectbox(
+    #     "Choose Dataset",
+    #     ["breast_cancer", "wine"],
+    #     help="Select the dataset for privacy-accuracy experiments"
+    # )
     
     # Model selection
     model_type = st.sidebar.selectbox(
         "ML Model",
-        ["random_forest", "logistic"],
-        help="Choose the machine learning model"
+        ["cnn"],
+        help="Opacus supports PyTorch Models (CNN)"
     )
-    
+    # model_type = st.sidebar.selectbox(
+    #     "ML Model",
+    #     ["random_forest", "logistic"],
+    #     help="Choose the machine learning model"
+    # )
+
+    # HE Toggle
+    # use_he = st.sidebar.checkbox(
+    #     "Enable Homomorphic Encryption",
+    #     value=False,
+    #     help="Perform Homomorphic Encryption on input data before training"
+    # )
+
     # Privacy parameters
     epsilon_range = st.sidebar.slider(
         "Epsilon Range",
@@ -43,89 +57,84 @@ def main():
         step=0.1,
         help="Range of epsilon values for differential privacy"
     )
-    
+
+    epochs = st.sidebar.number_input("Training Epochs", min_value=5, max_value=10, value=10)
+
     num_epsilon_points = st.sidebar.slider(
-        "Number of Epsilon Points",
-        min_value=5,
-        max_value=20,
-        value=10,
-        help="Number of epsilon values to test"
+        "Number of Experiments",
+        min_value=3,
+        max_value=10,
+        value=5
     )
     
-    st.markdown('Privacy-Accuracy Analysis', unsafe_allow_html=True)
-    
+    if st.sidebar.button("Run Experiments"):
+        run_experiments = True
+    else:
+        run_experiments = False
     # Generate epsilon values
     epsilon_values = np.linspace(epsilon_range[0], epsilon_range[1], num_epsilon_points)
-    
-    # Generate data and run experiments
-    with st.spinner("Generating dataset and running experiments..."):
+
+    # Load Data
+    with st.spinner("Loading MNIST dataset... (this may take a minute first time)"):
+        X, y = load_data()
+
+        # Subsample for Speed in Dashboard Demo
+        # MNIST is 70k. Let's use 5k for responsiveness.
+        indices = np.random.choice(len(X), 2000, replace=False)
+        X = X[indices]
+        y = y[indices]
+
+    if run_experiments:
+        st.markdown('Privacy-Accuracy Analysis', unsafe_allow_html=True)
         X, y, feature_names = generate_sample_data(dataset_type)
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.5, random_state=42)
-        
-        # Run experiments
+
+        # if use_he:
+        #     with st.spinner("Applying Homomorphic Encryption simulation (this may take a moment)..."):
+        #         X = apply_he_to_data(X)
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+        epsilon_values = np.linspace(epsilon_range[0], epsilon_range[1], num_epsilon_points)
         accuracy_values = []
         privacy_scores = []
-        
+
         progress_bar = st.progress(0)
         status_text = st.empty()
-        
+
+        chart_placeholder = st.empty()
+
         for i, epsilon in enumerate(epsilon_values):
-            status_text.text(f"Testing epsilon = {epsilon:.2f}")
-            
-            # Train model with privacy
+            status_text.text(f"Training with Epsilon = {epsilon:.2f}...")
             model = PrivacyMLModel(model_type)
-            X_private = model.train_with_privacy(X_train, y_train, epsilon)
-            
-            # Test accuracy
+            model.train_with_privacy(X_train, y_train, epsilon, epochs=epochs)
+
             y_pred = model.predict(X_test)
-            accuracy = accuracy_score(y_test, y_pred)
-            accuracy_values.append(accuracy)
-            
-            # Calculate privacy score (higher epsilon = lower privacy)
-            privacy_score = 1 / (1 + epsilon)
-            privacy_scores.append(privacy_score)
-            
+            acc = accuracy_score(y_test, y_pred)
+            accuracy_values.append(acc)
+            privacy_scores.append(1 / (1 + epsilon))
+
             progress_bar.progress((i + 1) / len(epsilon_values))
-        
+            fig = create_privacy_accuracy_plot(epsilon_values[:i + 1], accuracy_values, privacy_scores)
+            chart_placeholder.plotly_chart(fig, use_container_width=True)
+
         status_text.text("Analysis complete!")
-        progress_bar.empty()
-        status_text.empty()
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Best Accuracy", f"{max(accuracy_values):.3f}")
 
-    with col2:
-        st.metric("Worst Accuracy", f"{min(accuracy_values):.3f}")
-    
-    with col3:
-        st.metric("Accuracy Range", f"{max(accuracy_values) - min(accuracy_values):.3f}")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Best Accuracy", f"{max(accuracy_values):.3f}")
+        with col2:
+            st.metric("Worst Accuracy", f"{min(accuracy_values):.3f}")
+        with col3:
+            st.metric("Privacy Cost", f"High: {min(epsilon_values)} - Low: {max(epsilon_values)}")
 
-    
-    fig = create_privacy_accuracy_plot(epsilon_values, accuracy_values, privacy_scores)
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("""
-
-       #### **Privacy Score Calculation:**
-       ```
-       Privacy Score = 1/(1+ε)
-       ```
-       - Higher epsilon = Lower privacy
-       - Lower epsilon = Higher privacy
-       """)
-
-    st.markdown("Results")
-    results_df = pd.DataFrame({
-        'Epsilon': epsilon_values,
-        'Privacy Score': privacy_scores,
-        'Accuracy': accuracy_values
-    })
-    
-    st.dataframe(results_df.round(4), use_container_width=True)
-
-
+        st.markdown("### Results Table")
+        results_df = pd.DataFrame({
+            'Target Epsilon': epsilon_values,
+            'Accuracy': accuracy_values
+        })
+        st.dataframe(results_df.round(4), use_container_width=True)
+    else:
+        st.info("Adjust parameters in the sidebar and click 'Run Experiments' to start.")
 
 if __name__ == "__main__":
     main()
