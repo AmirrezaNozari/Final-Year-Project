@@ -3,18 +3,24 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from privacy_ml_framework import (
-    PrivacyMLModel, get_mnist_data, create_privacy_accuracy_plot, apply_tenseal_encryption
+    PrivacyMLModel, get_mnist_data, create_privacy_accuracy_plot, apply_tenseal_encryption,
+    run_encrypted_inference
 )
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import random
 import torch
+import os
 
 random.seed(42)
 st.set_page_config(
     page_title="Privacy-Accuracy Tradeoff Dashboard",
     layout="wide"
 )
+
+@st.cache_data
+def load_data():
+    return get_mnist_data()
 
 def main():
     st.header('Privacy-Accuracy Tradeoff Dashboard')
@@ -32,7 +38,7 @@ def main():
     # Model selection
     model_type = st.sidebar.selectbox(
         "ML Model",
-        ["cnn"],
+        ["he_cnn", "logistic"],
         help="Opacus supports PyTorch Models (CNN)"
     )
     # model_type = st.sidebar.selectbox(
@@ -66,6 +72,20 @@ def main():
         max_value=10,
         value=5
     )
+
+    he_sample_mode = st.sidebar.radio(
+        "Inference Scope (for HE Experiments)",
+        ["Small Sample (Demo)", "Full Test Set (Slow)"],
+        index=0
+    )
+    if he_sample_mode == "Small Sample (Demo)":
+        he_samples_count = st.sidebar.slider("Number of Samples per Epsilon", 1, 50, 10)
+    else:
+        he_samples_count = -1  # Flag for full set
+        st.sidebar.warning(
+            f"Warning: You selected {num_epsilon_points} experiments. Running Full HE Inference for ALL of them will take significant time.")
+
+    st.sidebar.markdown("---")
     
     if st.sidebar.button("Run Experiments"):
         run_experiments = True
@@ -86,16 +106,18 @@ def main():
 
     if run_experiments:
         st.markdown('Privacy-Accuracy Analysis', unsafe_allow_html=True)
-        X, y, feature_names = generate_sample_data(dataset_type)
-
         # if use_he:
         #     with st.spinner("Applying Homomorphic Encryption simulation (this may take a moment)..."):
         #         X = apply_he_to_data(X)
+
+        st.warning("HE Simulation (Noise Injection) Enabled for Training Data.")
+        X_sub = apply_tenseal_encryption(X)
 
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
         epsilon_values = np.linspace(epsilon_range[0], epsilon_range[1], num_epsilon_points)
         accuracy_values = []
+        he_accuracy_values = []
         privacy_scores = []
 
         progress_bar = st.progress(0)
@@ -111,27 +133,43 @@ def main():
             y_pred = model.predict(X_test)
             acc = accuracy_score(y_test, y_pred)
             accuracy_values.append(acc)
-            privacy_scores.append(1 / (1 + epsilon))
 
+            # Determine subset for this iteration
+
+            if he_samples_count == -1:
+                X_he_iter = X_test
+                y_he_iter = y_test
+            else:
+                # Pick random subset or first N
+                X_he_iter = X_test[:he_samples_count]
+                y_he_iter = y_test[:he_samples_count]
+
+            # Run HE
+            he_res = run_encrypted_inference(model, X_he_iter, y_he_iter)
+            he_accuracy_values.append(he_res['accuracy'])
+
+            privacy_scores.append(1 / (1 + epsilon))
             progress_bar.progress((i + 1) / len(epsilon_values))
-            fig = create_privacy_accuracy_plot(epsilon_values[:i + 1], accuracy_values, privacy_scores)
+
+            he_acc_to_plot = he_accuracy_values if he_accuracy_values else None
+            fig = create_privacy_accuracy_plot(epsilon_values[:i+1], accuracy_values, privacy_scores, he_acc_to_plot)
             chart_placeholder.plotly_chart(fig, use_container_width=True)
 
         status_text.text("Analysis complete!")
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Best Accuracy", f"{max(accuracy_values):.3f}")
-        with col2:
-            st.metric("Worst Accuracy", f"{min(accuracy_values):.3f}")
+            st.metric("Best Accuracy (Plain)", f"{max(accuracy_values):.3f}")
+        with col2: st.metric("Best Accuracy (Real HE)", f"{max(he_accuracy_values):.3f}")
         with col3:
             st.metric("Privacy Cost", f"High: {min(epsilon_values)} - Low: {max(epsilon_values)}")
 
         st.markdown("### Results Table")
-        results_df = pd.DataFrame({
-            'Target Epsilon': epsilon_values,
-            'Accuracy': accuracy_values
-        })
+
+        data_dict = {'Target Epsilon': epsilon_values, 'Plaintext Accuracy': accuracy_values,
+                     'Real HE Accuracy': he_accuracy_values}
+
+        results_df = pd.DataFrame(data_dict)
         st.dataframe(results_df.round(4), use_container_width=True)
     else:
         st.info("Adjust parameters in the sidebar and click 'Run Experiments' to start.")

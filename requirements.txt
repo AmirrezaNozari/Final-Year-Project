@@ -8,3 +8,4 @@ opacus
 torch
 torchvision
 tenseal
+streamlit
